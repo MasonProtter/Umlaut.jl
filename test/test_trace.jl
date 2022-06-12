@@ -232,10 +232,10 @@ end
     @test findfirst(op -> op isa Loop, tape.ops) === nothing
     # same number of iteration
     @test play!(tape, loop1, 2.0, 3) == loop1(2.0, 3)
-    @test compile(tape)(loop1, 2.0, 3) == loop1(2.0, 3)
+    @test_broken compile(tape)(loop1, 2.0, 3) == loop1(2.0, 3)
     # different number of iteration - with loop tracing off, should be incorrect
     @test play!(tape, loop1, 2.0, 4) != loop1(2.0, 4)
-    @test compile(tape)(loop1, 2.0, 4) != loop1(2.0, 4)
+    @test_broken compile(tape)(loop1, 2.0, 4) != loop1(2.0, 4)
 
     # should_trace_loops!(true)
 
