@@ -189,9 +189,15 @@ The default implementation checks if the call is a primitive and either
 records it to the tape or recurses into it.
 """
 function record_or_recurse!(t::Tracer{C}, vs...) where C
+    global STATE = (t, vs)
     fvals = [v isa V ? t.tape[v].val : v for v in vs]
-    return if isprimitive(t.tape.c, fvals...)
-        record_primitive!(t.tape, vs...)
+    # fvals[1] == getfield && error("!")
+    if (vs[1] == getfield && vs[2] isa V && vs[3] isa Integer && t.tape[vs[2]].val isa Tuple)
+        # implicit getfield on a tuple - convert to a variable with an index
+        src, idx = vs[2:3]
+        return V(t.tape[src], idx)
+    elseif isprimitive(t.tape.c, fvals...)
+        return record_primitive!(t.tape, vs...)
     else
         fargtypes = (fvals[1], map(Core.Typeof, fvals[2:end]))
         meth = which(fargtypes...)
@@ -200,7 +206,7 @@ function record_or_recurse!(t::Tracer{C}, vs...) where C
             va = push!(t.tape, mkcall(tuple, v_args[meth.nargs - 1:end]...))
             v_args = (v_args[1:meth.nargs - 2]..., va)
         end
-        trace!(t, getcode(fargtypes...), v_f, v_args...)
+        return trace!(t, getcode(fargtypes...), v_f, v_args...)
     end
 end
 

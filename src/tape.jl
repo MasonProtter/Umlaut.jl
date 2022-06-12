@@ -18,31 +18,39 @@ Variables (also aliesed as `V`) can be:
 * bound, created as `V(op)` or V(tape, id) - used to keep a robust
   reference to an operation on the tape
 
+Bound variables can also point to a specific element in a tuple-valued op.
+For example, `V(op, 2)` points to the second element of op tuple.
+
 See also: [`bound`](@ref)
 """
 mutable struct Variable
-    _id::Union{<:Integer,Nothing}
-    _op::Union{AbstractOp,Nothing}
+    _id::Union{<:Integer, Nothing}
+    _op::Union{AbstractOp, Nothing}
     _hash::Union{UInt64, Nothing}
+    _idx::Union{<:Integer, Nothing}
 end
 
-Variable(id::Integer) = Variable(id, nothing, nothing)
-Variable(op::AbstractOp) = Variable(nothing, op, nothing)
+Variable(id::Integer) = Variable(id, nothing, nothing, nothing)
+Variable(op::AbstractOp) = Variable(nothing, op, nothing, nothing)
+Variable(op::AbstractOp, idx::Integer) = Variable(nothing, op, nothing, idx)
 
-Base.show(io::IO, v::Variable) = print(io, "%$(v.id)")
+Base.show(io::IO, v::Variable) = isnothing(v.idx) ? print(io, "%$(v.id)") : print(io, "%$(v.id)[$(v.idx)]")
 
 
 function Base.getproperty(v::Variable, p::Symbol)
     if p == :id
         if v._op !== nothing
-            # variable bound to a specific operation on a tapea
+            # variable bound to a specific operation
             return v._op.id
         else
             # free variable with only ID
             return v._id
         end
     elseif p == :op
-        return v._op
+        # pseudo getfield for a variable with index
+        return isnothing(v.idx) ? v._op : mkcall(getfield, V(v._op), v.idx)
+    elseif p == :idx
+        return v._idx
     else
         return getfield(v, p)
     end
@@ -51,7 +59,7 @@ end
 function Base.setproperty!(v::Variable, p::Symbol, x)
     if p == :id
         if v._op !== nothing
-            # variable bound to a specific operation on a tapea
+            # variable bound to a specific operation on a tape
             v._op.id = x
         else
             # free variable with only ID
@@ -65,16 +73,17 @@ end
 
 function Base.:(==)(v1::Variable, v2::Variable)
     # variables are equal if:
+    # * their index is equal (possibly to nothing), and
     # * both are bound to the same operation, or
     # * both are unbound and their IDs are equal
-    return v1._op === v2._op && v1.id == v2.id
+    return v1._op === v2._op && v1.id == v2.id && v1.idx == v2.idx
 end
 
 function Base.hash(v::Variable, h::UInt)
     # note that the hash is calculated only once and stored as a field
     # this way we can safely put variables into a Dict
     if isnothing(v._hash)
-        h = hash(v.id, hash(v._op, h))
+        h = hash(v.idx, hash(v.id, hash(v._op, h)))
         v._hash = h
     end
     return v._hash
@@ -185,11 +194,11 @@ function mkcall(fn, args...; val=missing, kwargs...)
     fargs = (fn, args...)
     calculable = all(
         a -> !isa(a, Variable) ||                      # not variable
-        (a._op !== nothing && a._op.val !== missing),  # bound variable
+        (a.op !== nothing && a.op.val !== missing),  # bound variable
         fargs
     )
     if val === missing && calculable
-        fargs_ = map_vars(v -> v._op.val, fargs)
+        fargs_ = map_vars(v -> v.op.val, fargs)
         fn_, args_ = fargs_[1], fargs_[2:end]
         val_ = fn_(args_...)
     else
@@ -295,7 +304,14 @@ function inputs!(tape::Tape, vals...)
     return [V(op) for op in tape.ops[1:length(vals)]]
 end
 
-Base.getindex(tape::Tape, v::Variable) = tape.ops[v.id]
+function Base.getindex(tape::Tape, v::Variable)
+    if isnothing(v.idx)
+        return tape.ops[v.id]
+    else
+        # create pseudo getfield for the indexed variable
+        return mkcall(getfield, V(v._op), v.idx)
+    end
+end
 
 function Base.setindex!(tape::Tape, op::AbstractOp, v::Variable)
     op.id = v.id
@@ -580,7 +596,7 @@ function exec!(tape::Tape, op::Loop)
         exec!(subtape, subtape[V(vi)])
         if vi == cond_var.id && subtape[V(vi)].val == false
             actual_exit_vars = loop_exit_vars_at_point(op, vi)
-            op.val = ([v._op.val for v in actual_exit_vars]...,)
+            op.val = ([v.op.val for v in actual_exit_vars]...,)
             break
         end
         vi += 1
