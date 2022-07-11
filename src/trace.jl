@@ -172,6 +172,21 @@ end
 rewrite_special_cases(st) = st
 
 
+# function unapply_iterate(tape::Tape, st::Expr)
+#     ex = Meta.isexpr(st, :(=)) ? st.args[2] : st
+#     if Meta.isexpr(ex, :call) && promote_const_value(ex.args[1]) == Core._apply_iterate
+#         args = []
+#         for t in ex.args[4:end]
+#             @assert tape[t] isa Call && tape[t].fn == tuple
+#             push!(args, tape[t].args...)
+#         end
+#         ex = Expr(:call, ex.args[2], args...)
+#     end
+#     return Meta.isexpr(st, :(=)) ? Expr(:(=), st.args[1], ex) : ex
+# end
+# unapply_iterate(tape::Tape, st) = st
+
+
 function get_static_params(t::Tracer, v_fargs)
     fvals = [v isa V ? t.tape[v].val : v for v in v_fargs]
     fn, vals... = fvals
@@ -211,6 +226,7 @@ function trace!(t::Tracer, ci::CodeInfo, v_fargs...)
     i = 1
     while i <= length(ci.code)
         st = rewrite_special_cases(ci.code[i])
+        # st = unapply_iterate(t.tape, st)
         if Meta.isexpr(st, :call) || (Meta.isexpr(st, :(=)) && Meta.isexpr(st.args[2], :call))
             # function call
             sv = SSAValue(i)
