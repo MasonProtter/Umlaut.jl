@@ -172,19 +172,34 @@ end
 rewrite_special_cases(st) = st
 
 
-# function unapply_iterate(tape::Tape, st::Expr)
-#     ex = Meta.isexpr(st, :(=)) ? st.args[2] : st
-#     if Meta.isexpr(ex, :call) && promote_const_value(ex.args[1]) == Core._apply_iterate
-#         args = []
-#         for t in ex.args[4:end]
-#             @assert tape[t] isa Call && tape[t].fn == tuple
-#             push!(args, tape[t].args...)
+# """
+#     unapply_iterate(tape::Tape, vs::Vector)
+
+# When possible, rewrite call to `Core._apply_iterate(iterate, f, (v1, v2, ...))`,
+# which is lowered representation of the argument splatting with ``...``,
+# to just `f(v1, v2, ...)`.
+
+# Doesn't work on splatted input arguments.
+# """
+# function unapply_iterate(tape::Tape, vs::Vector)
+#     f = vs[1] isa V ? tape[vs[1]].val : vs[1]
+#     f == Core._apply_iterate || return vs
+#     # all(v -> v isa V && tape[v] isa Call && tape[v].fn == tuple, vs) || return vs
+#     new_vs = []
+#     for v in vs[3:end]
+#         if v isa V
+#             if tape[v] isa Call && tape[v].fn == tuple
+#                 push!(new_vs, tape[v].args...)
+#             else
+#                 # some variable is not a tuple - abort rewriting
+#                 return vs
+#             end
+#         else
+#             push!(new_vs, v)
 #         end
-#         ex = Expr(:call, ex.args[2], args...)
 #     end
-#     return Meta.isexpr(st, :(=)) ? Expr(:(=), st.args[1], ex) : ex
+#     return new_vs
 # end
-# unapply_iterate(tape::Tape, st) = st
 
 
 function get_static_params(t::Tracer, v_fargs)
@@ -195,6 +210,19 @@ function get_static_params(t::Tracer, v_fargs)
 end
 
 
+function group_varargs(t::Tracer, v_fargs)
+    fargs = map_vars(v -> t.tape[v].val, v_fargs)
+    fargtypes = (fargs[1], map(Core.Typeof, fargs[2:end]))
+    meth = which(fargtypes...)
+    v_f, v_args... = v_fargs
+    if meth.isva
+        va = push!(t.tape, mkcall(tuple, v_args[meth.nargs - 1:end]...))
+        v_args = (v_args[1:meth.nargs - 2]..., va)
+    end
+    return v_f, v_args
+end
+
+
 """
     record_or_recurse!(t::Tracer{C}, v_f, v_args...) where C
 
@@ -202,19 +230,14 @@ Customizable handler that controls what to do with a function call.
 The default implementation checks if the call is a primitive and either
 records it to the tape or recurses into it.
 """
-function record_or_recurse!(t::Tracer{C}, vs...) where C
-    fvals = [v isa V ? t.tape[v].val : v for v in vs]
-    return if isprimitive(t.tape.c, fvals...)
+function trace_call!(t::Tracer{C}, vs...) where C
+    # fargs = [v isa V ? t.tape[v].val : v for v in vs]
+    fargs = map_vars(v -> t.tape[v].val, vs)
+    return if isprimitive(t.tape.c, fargs...)
         record_primitive!(t.tape, vs...)
     else
-        fargtypes = (fvals[1], map(Core.Typeof, fvals[2:end]))
-        meth = which(fargtypes...)
-        v_f, v_args... = vs
-        if meth.isva
-            va = push!(t.tape, mkcall(tuple, v_args[meth.nargs - 1:end]...))
-            v_args = (v_args[1:meth.nargs - 2]..., va)
-        end
-        trace!(t, getcode(fargtypes...), v_f, v_args...)
+        vs = group_varargs(t, vs)
+        trace!(t, get_ir(fargs...), vs...)
     end
 end
 
@@ -233,24 +256,12 @@ function trace!(t::Tracer, ci::CodeInfo, v_fargs...)
             ex = Meta.isexpr(st, :(=)) ? st.args[2] : st
             vs = resolve_tape_vars(frame, ex.args...)
             vs = [Meta.isexpr(x, :static_parameter) ? sparams[x.args[1]] : x for x in vs]
-            v = record_or_recurse!(t, vs...)
-            frame.ir2tape[sv] = v
-            if Meta.isexpr(st, :(=))
-                # update mapping for slot
-                slot = st.args[1]
-                frame.ir2tape[slot] = v
-            end
-            i += 1
-        elseif Meta.isexpr(st, :(=))
-            # constant or assignment
-            sv = st.args[1]
-            rhs = resolve_tape_vars(frame, st.args[2])[1]
-            # RHS may be a variable or a constant value; in both cases we simply
-            # update the mapping from LHS (SlotNumber & SSAValue) to the RHS
-            frame.ir2tape[sv] = rhs
-            frame.ir2tape[SSAValue(i)] = rhs
-            i += 1
-        elseif st isa SlotNumber
+            # global STATE = t, ir, bi, prev_bi, sparams, pc, ex
+            # vs[1] == Core._apply_iterate && error("HERE")
+            # vs = unapply_iterate(t.tape, vs)
+            v = trace_call!(t, vs...)
+            frame.ir2tape[SSAValue(pc)] = v
+        elseif ex isa SSAValue || ex isa Argument
             # assignment
             sv = SSAValue(i)
             frame.ir2tape[sv] = frame.ir2tape[st]
@@ -347,7 +358,7 @@ Examples:
     #   %4 = +(%3, 1)::Float64
     # )
 """
-function trace(f, args...; ctx=BaseCtx(), fargtypes=nothing, deprecated_kws...)
+function trace(f, args...; ctx=BaseCtx(), deprecated_kws...)
     warn_deprecated_keywords(deprecated_kws)
     if isnothing(fargtypes)
         fargtypes = (f, map(Core.Typeof, args))
@@ -379,7 +390,7 @@ get_latest_tracer() = LATEST_TRACER[]
 function get_latest_tracer_state()
     t = get_latest_tracer()
     frame = t.stack[end]
-    return t, frame.ci, frame.v_fargs
+    return t, frame.ir, frame.v_fargs
 end
 
 function print_stack_trace()
