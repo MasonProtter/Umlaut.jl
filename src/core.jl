@@ -12,3 +12,5 @@ include("trace.jl")
 include("optimize.jl")
 include("compile.jl")
 include("pretty.jl")
+
+include("track.jl")
